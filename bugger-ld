@@ -1,0 +1,280 @@
+#!/bin/ksh93
+# -*- mode: shell-script -*-
+
+# Gather a tarball including all the information necessary to debug the
+# link-editor
+
+# XXX: -l/--library can also take a path, which we don't fix up in
+# shell_scriptify
+
+# XXX: We make no attempt to handle -zld32 and -zld64 parsing the arguments
+# out of -Dargs might be wiser, but we'd have to extend ld to give us a better
+# view of the command line to do that.
+
+function fail {
+    print -u2 "$0: $@"
+    exit 1;
+}
+
+# It's important to the portability of 'build.sh' that we don't do a full
+# realpath here, as that would fix up symlinks which we can't necessarily
+# reproduce in the objects/ environment.
+function realpath {
+    perl -MFile::Spec -le 'print File::Spec->rel2abs($ARGV[0])' "$1"
+}
+
+# Parse enough of the linker command line to return the output file as
+# specified
+function calc_tar_name {
+    outfile=
+    while (( $# > 0 )); do
+        if [[ $1 == -o* ]]; then
+            getopts :o: name $@
+            outfile=$OPTARG;
+            break;
+        elif [[ $1 == --output ]]; then
+            outfile=$2;
+            break;
+        fi
+        shift;
+    done
+
+    if [[ -n $outfile ]]; then
+        realpath $outfile
+    fi
+}
+
+# Extract from the link-editor debug log the list of files involved in the link
+# (this helpfully is the files actually used, with all paths resolved)  
+function file_list {
+    log=$1
+
+    # files, mapfiles, arguments to -p or -P (filters), -S (support libs)
+    #
+    # Note that the file= regexp excludes file components of archive libraries
+    # ('(' is not allowed in the name), this is ok because the archive itself
+    # will already have been processed.
+    sed -n \
+        -e '/^debug: file=\([^(\[]*\)\[.*$/s//\1/p' \
+        -e '/^debug: mapfile=\([^;]*\).*$/s//\1/p' \
+        -e '/^debug: arg.*option=-[SpP]:.*option-argument: \(.*\)$/s//\1/p' $log
+}
+
+# Redirect paths to point into our own object tree, for shell_scriptify
+function fix_path {
+    # I'm a bit ashamed of cheating
+    perl -MFile::Spec -e 'print File::Spec->abs2rel($ARGV[0], $ARGV[1]);' \
+        $1 $PWD
+}
+
+# Fix colon-separated paths such as -L, -R, and -Y
+function fix_colon_path {
+    for elt in $(echo $1 | sed -e 's/:/ /g'); do
+        fix_path $elt
+        printf ":"
+    done | sed -e 's/:$//' # Yow
+}
+
+# Fix the -Y arguments, which are whacky
+function fix_Y {
+    echo $1 | nawk -F, '{ print $1, $2 }'| read prior path
+    printf "%s," $prior
+    fix_colon_path $path
+}
+
+# Take this argument, the next argument (potentially the value of this
+# argument) and optional post-processor for the value.
+#
+# Process the argument to deal correctly with the value, regardless of whether
+# it is -Ofoo or -O foo, and return the amount we need to shift to move to the
+# next argument.
+function arg_value {
+    opt=${1:1:1}                # First character of $1
+    processor=${3:-echo}
+    getopts ${opt}: name $@;
+
+    printf -- "-$name '%s'" $($processor $OPTARG);
+
+    if [[ "$2" == "$OPTARG" ]]; then
+        return 1
+    else
+        return 0 
+    fi
+}
+
+# Take the linker command line, and adjust it such that any reference to an
+# input object is relative (and thus applies to our object directory).
+function shell_scriptify {
+    printf "$1 "                # Leave the command untouched
+    shift;
+    while (( $# > 0 )); do
+        if [[ $1 == -* ]]; then
+            case $1 in
+                -32) printf -- $1;;
+                -64) printf -- $1;;
+                -a) printf -- $1;;
+                -r) printf -- $1;;
+                -b) printf -- $1;;
+                -B*) 
+                    arg_value $1 $2
+                    shift $?;;
+                -c*) 
+                    arg_value $1 $2
+                    shift $?;;
+                -C) printf -- $1;;
+                -d*) 
+                    arg_value $1 $2
+                    shift $?;;
+                -D*) arg_value $1 $2
+                    shift $?;;
+                -e*) arg_value $1 $2
+                    shift $?;;
+                -f*) arg_vaule $1 $2
+                    shift $?;;
+                -F*) arg_value $1 $2
+                    shift $?;;
+                -G) printf -- $1;;
+                -h*) arg_value $1 $2
+                    shift $?;;
+                -i) printf -- $1;;
+                -I*) arg_value $1 $2
+                    shift $?;;
+                -l*) arg_value $1 $2
+                    shift $?;;
+                -L*) arg_value $1 $2 fix_colon_path
+                    shift $?;;
+                -m) printf -- $1;;
+                -M*) arg_value $1 $2 fix_path
+                    shift $?;;
+                -N*) arg_value $1 $2
+                    shift $?;;
+                -o*) arg_value $1 $2 fix_path
+                    shift $?;;
+                -p*) arg_value $1 $2 fix_path
+                    shift $?;;
+                -P*) arg_value $1 $2 fix_path
+                    shift $?;;
+                -Q*) arg_value $1 $2
+                    shift $?;;
+                -R*) arg_value $1 $2 fix_colon_path
+                    shift $?;;
+                -s) printf -- $1;;
+                -S*) arg_value $1 $2 fix_path
+                    shift $?;;
+                -t) printf -- $1;;
+                -u*) arg_value $1 $2
+                    shift $?;;
+                -V) printf -- $1;;
+                -Y*) arg_value $1 $2 fix_Y
+                    shift $?;;
+                -z*) arg_value $1 $2
+                    shift $?;;
+
+                # Long options, which at least must be space separated
+                -rpath) printf "%s %s" $1 $2; 
+                    shift;;
+                --entry) printf "%s %s" $1 $2; 
+                    shift;;
+                --auxiliary) printf "%s %s" $1 $2; 
+                    shift;;
+                --filter) printf "%s %s" $1 $2; 
+                    shift;;
+                -shared) printf "%s" $1;;
+                --soname) printf "%s %s" $1 $2; 
+                    shift;;
+                --dynamic-linker) printf "%s %s" $1 $(fix_path $2); 
+                    shift;;
+                --library) printf "%s %s" $1 $2;;
+                --output) printf "%s %s" $1 $(fix_path $2); 
+                    shift;;
+                --relocatable) printf "%s" $1;;
+                --strip-all) printf "%s" $1;;
+                --undefined) printf "%s %s" $1 $2;;
+                --version) printf "%s" $1;;
+                --whole-archive | --no-whole-archive) printf "%s" $1;;
+                --no-undefined) printf "%s" $1;;
+                --fatal-warnings | --no-fatal-warnings) printf "%s" $1;;
+                --help) printf "%s" $1;;
+                --allow-multiple-definition) printf "%s" $1;;
+                --start-group | --end-group) printf "%s" $1;;
+                -wrap=*|--wrap=*) printf "%s" $1;;
+                *) fail "Unknown and unhandled linker option: $1";;
+            esac
+        else
+            fix_path $1
+        fi
+        shift;
+        printf " "
+    done
+    printf "\n"
+}
+
+function cleanup {
+    if [[ -d "$TMPDIR" ]]; then
+        rm -fr $TMPDIR
+    fi
+}
+
+trap cleanup 'EXIT'
+
+if [[ -z $BUG_DIR ]]; then
+    BUG_DIR=/tmp/ldbug.$$
+    print -u2 "$0: *** OUTPUT AVAILABLE IN: $BUG_DIR ***" 
+fi
+
+OPTS=$@
+OUTFILE=$(calc_tar_name $OPTS)
+TARNAME=$(echo $OUTFILE | digest -a md5)
+[[ -z $TARNAME ]] && fail "Could not determine output name"
+
+TMPDIR=${BUG_DIR}/${TARNAME}
+mkdir -p $TMPDIR
+
+REAL_LD=${REAL_LD:-/bin/ld}
+
+# Save the version of the linker the user is using 
+$REAL_LD -V > $TMPDIR/version 2>&1
+
+# Save the current directory at the name we linked, so we have a chance of
+# getting any relative paths easily correct.
+echo $PWD > $TMPDIR/current-directory
+
+# Save the enivornment, so we can't be screwed by LD_OPTIONS and friends
+env > $TMPDIR/environment
+
+# make sure the current directory exists in the tarball
+mkdir -p $TMPDIR/objects/$PWD
+
+# Save the command line
+echo $REAL_LD $OPTS > $TMPDIR/command-line
+env | nawk -F= '/^LD_/ { printf "export %s=\"%s\"\n", $1, $2 }' > \
+    $TMPDIR/build.sh
+echo "cd $TMPDIR/objects/$PWD" >> $TMPDIR/build.sh
+shell_scriptify $REAL_LD $OPTS >> $TMPDIR/build.sh
+
+# Actually run the linker, so we get output.  From this we'll find the files
+# to archive
+$REAL_LD -Dall,detail,long $OPTS > $TMPDIR/output 2>&1
+RESULT=$?
+
+file_list $TMPDIR/output | \
+    while read obj; do 
+        obj=$(realpath $obj)
+        op=$TMPDIR/objects/$(dirname $obj)
+        mkdir -p $op
+        cp $obj $op
+
+        # Make the compilation links for any libraries, this is not foolproof,
+        # or good.
+        if [[ $obj == *.so.* ]]; then
+            ln -s $(basename $obj) $op/$(basename ${obj%%.so.*}.so)
+        fi
+    done;
+
+# Remove our debugging gunk, and show output to the user
+grep -v '^debug:' $TMPDIR/output >&2
+
+tar -C $TMPDIR/.. -czf ${BUG_DIR}/${TARNAME}.tar.gz ${TARNAME}
+echo "$OUTFILE -- $TARNAME" >> ${BUG_DIR}/index
+
+exit $RESULT
