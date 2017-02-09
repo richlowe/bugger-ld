@@ -222,6 +222,9 @@ if [[ -z $BUG_DIR ]]; then
     print -u2 "$0: *** OUTPUT AVAILABLE IN: $BUG_DIR ***" 
 fi
 
+export LANG=C
+export LC_ALL=C
+
 OPTS=$@
 OUTFILE=$(calc_tar_name $OPTS)
 TARNAME=$(echo $OUTFILE | digest -a md5)
