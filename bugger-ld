@@ -277,7 +277,7 @@ file_list $TMPDIR/output | \
 # Remove our debugging gunk, and show output to the user
 grep -v '^debug:' $TMPDIR/output >&2
 
-tar -C $TMPDIR/.. -czf ${BUG_DIR}/${TARNAME}.tar.gz ${TARNAME}
+tar -czf ${BUG_DIR}/${TARNAME}.tar.gz -C $TMPDIR/.. ${TARNAME}
 echo "$OUTFILE -- $TARNAME" >> ${BUG_DIR}/index
 
 exit $RESULT
